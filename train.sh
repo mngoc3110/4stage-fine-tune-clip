@@ -27,8 +27,8 @@ python main.py \
     --train-annotation RAER/annotation/train.txt \
     --test-annotation RAER/annotation/test.txt \
     --clip-path ViT-B/16 \
-    --bounding-box-face /kaggle/input/raer-video-emotion-dataset/RAER/RAER/bounding_box/face.json \
-    --bounding-box-body /kaggle/input/raer-video-emotion-dataset/RAER/RAER/bounding_box/body.json \
+    --bounding-box-face /kaggle/input/raer-video-emotion-dataset/RAER/bounding_box/face.json \
+    --bounding-box-body /kaggle/input/raer-video-emotion-dataset/RAER/bounding_box/body.json \
     --text-type class_descriptor \
     --contexts-number 8 \
     --class-token-position end \
