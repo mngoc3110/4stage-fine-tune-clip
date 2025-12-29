@@ -17,6 +17,8 @@ class Trainer:
         self.device = device
         self.print_freq = 10
         self.log_txt_path = log_txt_path
+        # Initialize GradScaler for AMP
+        self.scaler = torch.cuda.amp.GradScaler()
 
     def _run_one_epoch(self, loader, epoch_str, is_train=True):
         """Runs one epoch of training or validation."""
@@ -56,35 +58,38 @@ class Trainer:
                 images_body = images_body.to(self.device)
                 target = target.to(self.device)
 
-                # Forward pass
-                output_dict = self.model(images_face, images_body)
-                
-                # Extract components for loss
-                logits = output_dict["logits"]
-                learnable_text_features = output_dict.get("learnable_text_features")
-                hand_crafted_text_features = output_dict.get("hand_crafted_text_features")
-                logits_hand = output_dict.get("logits_hand")
+                # Use AMP autocast
+                with torch.cuda.amp.autocast():
+                    # Forward pass
+                    output_dict = self.model(images_face, images_body)
+                    
+                    # Extract components for loss
+                    logits = output_dict["logits"]
+                    learnable_text_features = output_dict.get("learnable_text_features")
+                    hand_crafted_text_features = output_dict.get("hand_crafted_text_features")
+                    logits_hand = output_dict.get("logits_hand")
 
-                # Try parsing epoch for loss weighting
-                try:
-                    epoch_num = int(epoch_str)
-                except ValueError:
-                    epoch_num = 0
+                    # Try parsing epoch for loss weighting
+                    try:
+                        epoch_num = int(epoch_str)
+                    except ValueError:
+                        epoch_num = 0
 
-                loss_dict = self.criterion(
-                    logits, 
-                    target, 
-                    epoch=epoch_num,
-                    learnable_text_features=learnable_text_features,
-                    hand_crafted_text_features=hand_crafted_text_features,
-                    logits_hand=logits_hand
-                )
-                loss = loss_dict["total"]
+                    loss_dict = self.criterion(
+                        logits, 
+                        target, 
+                        epoch=epoch_num,
+                        learnable_text_features=learnable_text_features,
+                        hand_crafted_text_features=hand_crafted_text_features,
+                        logits_hand=logits_hand
+                    )
+                    loss = loss_dict["total"]
 
                 if is_train:
                     self.optimizer.zero_grad()
-                    loss.backward()
-                    self.optimizer.step()
+                    self.scaler.scale(loss).backward()
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
 
                 # Record metrics
                 preds = logits.argmax(dim=1)
