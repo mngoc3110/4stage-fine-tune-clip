@@ -26,7 +26,7 @@ python main.py \
     --image-size 224 \
     --seed 42 \
     --print-freq 10 \
-    --root-dir ./\
+    --root-dir /kaggle/input/raer-video-emotion-dataset/ \
     --train-annotation RAER/annotation/train.txt \
     --test-annotation RAER/annotation/test.txt \
     --clip-path ViT-B/16 \
