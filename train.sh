@@ -8,7 +8,7 @@ python main.py \
     --exper-name prompt_tuning_vitb16_cross_attn \
     --gpu 0 \
     --epochs 50 \
-    --batch-size 4 \
+    --batch-size 16 \
     --workers 4 \
     --lr 0.003 \
     --lr-image-encoder 1e-6 \
@@ -40,4 +40,6 @@ python main.py \
     --mi-ramp 5 \
     --dc-warmup 3 \
     --dc-ramp 5 \
-    --label-smoothing 0.2
+    --label-smoothing 0.2 \
+    --semantic-smoothing True \
+    --smoothing-temp 0.1

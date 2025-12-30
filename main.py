@@ -94,6 +94,9 @@ loss_group.add_argument('--mi-ramp', type=int, default=0, help='Epochs to ramp u
 loss_group.add_argument('--dc-warmup', type=int, default=0, help='Epochs to warmup DC loss.')
 loss_group.add_argument('--dc-ramp', type=int, default=0, help='Epochs to ramp up DC loss.')
 loss_group.add_argument('--label-smoothing', type=float, default=0.0, help='Label smoothing factor.')
+loss_group.add_argument('--semantic-smoothing', type=str, default='True', choices=['True', 'False'], help='Whether to use semantic-guided label smoothing (LDLVA-inspired).')
+loss_group.add_argument('--smoothing-temp', type=float, default=0.1, help='Temperature for semantic label distribution (lower = sharper).')
+
 
 
 # ==================== Helper Functions ====================
@@ -173,6 +176,34 @@ def run_training(args: argparse.Namespace) -> None:
     print("=> Building dataloaders...")
     train_loader, val_loader = build_dataloaders(args)
     print("=> Dataloaders built successfully.")
+
+    # Calculate class weights for RAER to improve recall on minority classes
+    if args.dataset == 'RAER':
+        print("=> Calculating class weights for RAER to handle imbalance...")
+        try:
+            # Access the underlying dataset labels
+            train_dataset = train_loader.dataset
+            # Labels are 1-based in file, 0-based in training
+            labels = [record.label - 1 for record in train_dataset.video_list]
+            
+            # Count frequencies
+            class_counts = np.bincount(labels)
+            total_samples = len(labels)
+            num_classes = len(class_counts)
+            
+            # Compute weights: w_j = N / (K * n_j)
+            # Add epsilon to avoid division by zero
+            class_weights = total_samples / (num_classes * (class_counts + 1e-6))
+            
+            # Pass to args so build_criterion picks it up
+            args.class_weights = class_weights.tolist()
+            
+            print(f"   Class Counts: {class_counts}")
+            print(f"   Computed Class Weights: {np.round(class_weights, 4)}")
+            print("   (These weights will be used in the Loss function to penalize errors on minority classes more heavily)")
+            
+        except Exception as e:
+            print(f"Warning: Could not calculate class weights automatically. Error: {e}")
 
     # Loss and optimizer
     criterion = build_criterion(args, mi_estimator=model.mi_estimator, num_classes=len(class_names)).to(args.device)
