@@ -96,6 +96,8 @@ loss_group.add_argument('--dc-ramp', type=int, default=0, help='Epochs to ramp u
 loss_group.add_argument('--label-smoothing', type=float, default=0.0, help='Label smoothing factor.')
 loss_group.add_argument('--semantic-smoothing', type=str, default='True', choices=['True', 'False'], help='Whether to use semantic-guided label smoothing (LDLVA-inspired).')
 loss_group.add_argument('--smoothing-temp', type=float, default=0.1, help='Temperature for semantic label distribution (lower = sharper).')
+loss_group.add_argument('--use-amp', type=str, default='True', choices=['True', 'False'], help='Enable or disable Automatic Mixed Precision (AMP).')
+loss_group.add_argument('--gradient-accumulation-steps', type=int, default=1, help='Number of steps to accumulate gradients before updating weights.')
 
 
 
@@ -218,7 +220,11 @@ def run_training(args: argparse.Namespace) -> None:
     scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=args.milestones, gamma=args.gamma)
     
     # Trainer
-    trainer = Trainer(model, criterion, optimizer, scheduler, args.device, log_txt_path)
+    trainer = Trainer(
+        model, criterion, optimizer, scheduler, args.device, log_txt_path,
+        use_amp=(args.use_amp == 'True'), 
+        gradient_accumulation_steps=args.gradient_accumulation_steps
+    )
     
     best_war = 0.0 # Track best WAR
 

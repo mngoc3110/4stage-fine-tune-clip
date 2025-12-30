@@ -2,14 +2,17 @@
 
 # Updated training script for 70% UAR Target (Optimized for Kaggle GPU P100/T4)
 # Note: If running locally on Mac M2, change batch-size to 4 to avoid OOM.
+# MODIFIED FOR ViT-B/16 with AMP and Gradient Accumulation - KAGGLE OPTIMIZED
 
 python main.py \
     --mode train \
     --exper-name prompt_tuning_vitb16_cross_attn \
     --gpu 0 \
     --epochs 50 \
-    --batch-size 16 \
+    --batch-size 8 \
     --workers 4 \
+    --gradient-accumulation-steps 1 \
+    --use-amp True \
     --lr 0.003 \
     --lr-image-encoder 1e-6 \
     --lr-prompt-learner 0.001 \
@@ -23,12 +26,12 @@ python main.py \
     --image-size 224 \
     --seed 42 \
     --print-freq 10 \
-    --root-dir /kaggle/input/raer-video-emotion-dataset \
+    --root-dir ./\
     --train-annotation RAER/annotation/train.txt \
     --test-annotation RAER/annotation/test.txt \
     --clip-path ViT-B/16 \
-    --bounding-box-face /kaggle/input/raer-video-emotion-dataset/RAER/bounding_box/face.json \
-    --bounding-box-body /kaggle/input/raer-video-emotion-dataset/RAER/bounding_box/body.json \
+    --bounding-box-face RAER/bounding_box/face.json \
+    --bounding-box-body RAER/bounding_box/body.json \
     --text-type class_descriptor \
     --contexts-number 8 \
     --class-token-position end \

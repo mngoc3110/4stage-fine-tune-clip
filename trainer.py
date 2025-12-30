@@ -9,7 +9,7 @@ from utils.utils import AverageMeter, ProgressMeter
 
 class Trainer:
     """A class that encapsulates the training and validation logic."""
-    def __init__(self, model, criterion, optimizer, scheduler, device,log_txt_path):
+    def __init__(self, model, criterion, optimizer, scheduler, device, log_txt_path, use_amp=True, gradient_accumulation_steps=1):
         self.model = model
         self.criterion = criterion
         self.optimizer = optimizer
@@ -17,13 +17,25 @@ class Trainer:
         self.device = device
         self.print_freq = 10
         self.log_txt_path = log_txt_path
-        # Initialize GradScaler for AMP
-        self.scaler = torch.cuda.amp.GradScaler()
+        
+        # Store AMP and accumulation settings
+        self.use_amp = use_amp
+        self.accumulation_steps = gradient_accumulation_steps
+        
+        # Initialize GradScaler for AMP, only for CUDA devices
+        # enabled flag handles both use_amp and device type check
+        is_cuda = self.device.type == 'cuda'
+        self.scaler = torch.cuda.amp.GradScaler(enabled=(self.use_amp and is_cuda))
+        
+        if self.use_amp and not is_cuda:
+            print("AMP is enabled but device is not CUDA. GradScaler will be disabled. Autocast will proceed on MPS/CPU.")
 
     def _run_one_epoch(self, loader, epoch_str, is_train=True):
         """Runs one epoch of training or validation."""
         if is_train:
             self.model.train()
+            # Zero gradients at the beginning of a training epoch
+            self.optimizer.zero_grad()
             prefix = f"Train Epoch: [{epoch_str}]"
         else:
             self.model.eval()
@@ -41,35 +53,26 @@ class Trainer:
         all_preds = []
         all_targets = []
 
+        # Use torch.no_grad for validation, otherwise default context manager
         context = torch.enable_grad() if is_train else torch.no_grad()
         
         with context:
             for i, batch_data in enumerate(loader):
-                # Handle empty batches (e.g., due to filtering corrupted data)
-                if batch_data is None:
+                # Handle potential empty batches
+                if batch_data is None or (isinstance(batch_data, torch.Tensor) and batch_data.numel() == 0):
                     continue
-                if isinstance(batch_data, torch.Tensor) and batch_data.numel() == 0:
-                     continue
                 
-                # Unpack valid batch
                 images_face, images_body, target = batch_data
-
                 images_face = images_face.to(self.device)
                 images_body = images_body.to(self.device)
                 target = target.to(self.device)
 
-                # Use AMP autocast
-                with torch.cuda.amp.autocast():
-                    # Forward pass
+                # Device-agnostic AMP autocasting
+                with torch.amp.autocast(device_type=self.device.type, dtype=torch.float16, enabled=self.use_amp):
                     output_dict = self.model(images_face, images_body)
                     
-                    # Extract components for loss
                     logits = output_dict["logits"]
-                    learnable_text_features = output_dict.get("learnable_text_features")
-                    hand_crafted_text_features = output_dict.get("hand_crafted_text_features")
-                    logits_hand = output_dict.get("logits_hand")
-
-                    # Try parsing epoch for loss weighting
+                    
                     try:
                         epoch_num = int(epoch_str)
                     except ValueError:
@@ -79,24 +82,39 @@ class Trainer:
                         logits, 
                         target, 
                         epoch=epoch_num,
-                        learnable_text_features=learnable_text_features,
-                        hand_crafted_text_features=hand_crafted_text_features,
-                        logits_hand=logits_hand
+                        learnable_text_features=output_dict.get("learnable_text_features"),
+                        hand_crafted_text_features=output_dict.get("hand_crafted_text_features"),
+                        logits_hand=output_dict.get("logits_hand")
                     )
                     loss = loss_dict["total"]
+                    
+                    # Normalize loss for gradient accumulation
+                    if self.accumulation_steps > 1:
+                        loss = loss / self.accumulation_steps
 
                 if is_train:
-                    self.optimizer.zero_grad()
-                    self.scaler.scale(loss).backward()
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
+                    # Backward pass
+                    if self.device.type == 'cuda':
+                        self.scaler.scale(loss).backward()
+                    else: # for MPS or CPU
+                        loss.backward()
+
+                    # Optimizer step (only after designated accumulation steps)
+                    if (i + 1) % self.accumulation_steps == 0 or (i + 1) == len(loader):
+                        if self.device.type == 'cuda':
+                            self.scaler.step(self.optimizer)
+                            self.scaler.update()
+                        else: # for MPS or CPU
+                            self.optimizer.step()
+                        
+                        self.optimizer.zero_grad()
 
                 # Record metrics
                 preds = logits.argmax(dim=1)
                 correct_preds = preds.eq(target).sum().item()
                 acc = (correct_preds / target.size(0)) * 100.0
 
-                losses.update(loss.item(), target.size(0))
+                losses.update(loss.item() * self.accumulation_steps, target.size(0)) # Scale loss back up for logging
                 war_meter.update(acc, target.size(0))
 
                 all_preds.append(preds.cpu())
@@ -110,16 +128,15 @@ class Trainer:
         all_targets = torch.cat(all_targets)
         
         cm = confusion_matrix(all_targets.numpy(), all_preds.numpy())
-        war = war_meter.avg # Weighted Average Recall (WAR) is just the overall accuracy
+        war = war_meter.avg # Weighted Average Recall (WAR) is the overall accuracy
         
         # Unweighted Average Recall (UAR)
-        class_acc = cm.diagonal() / (cm.sum(axis=1) + 1e-6) # Add epsilon to avoid division by zero
+        class_acc = cm.diagonal() / (cm.sum(axis=1) + 1e-6)
         uar = np.nanmean(class_acc) * 100
 
         logging.info(f"{prefix} * WAR: {war:.3f} | UAR: {uar:.3f}")
         with open(self.log_txt_path, 'a') as f:
-            f.write('Current UAR: {war:.3f}'.format(war=war) + '\n')
-            f.write('Current UAR: {uar:.3f}'.format(uar=uar) + '\n')
+            f.write(f'{prefix} * WAR: {war:.3f} | UAR: {uar:.3f}\n')
         return war, uar, losses.avg, cm
         
     def train_epoch(self, train_loader, epoch_num):
