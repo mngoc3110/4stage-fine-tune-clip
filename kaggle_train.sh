@@ -24,9 +24,8 @@ TRAIN_TXT="${ANNOT_DIR}/train_80.txt"
 VAL_TXT="${ANNOT_DIR}/val_20.txt"
 TEST_TXT="${ANNOT_DIR}/test.txt"
 
-# Bounding Box paths (Assuming they are uploaded to a dataset, e.g., raer-annot)
-# UPDATE THIS: Where did you upload face.json?
-BOX_DIR="/kaggle/input/raer-annot/bounding_box" 
+# Bounding Box paths (Corrected based on user input for main dataset)
+BOX_DIR="${ROOT_DIR}/RAER/bounding_box" 
 FACE_BOX="${BOX_DIR}/face.json"
 BODY_BOX="${BOX_DIR}/body.json"
 
