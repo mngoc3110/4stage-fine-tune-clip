@@ -2,7 +2,7 @@
 set -e
 
 # --- SETUP ENVIRONMENT (Kaggle/Colab) ---
- echo "=> Installing dependencies..."
+echo "=> Installing dependencies..."
 pip install git+https://github.com/openai/CLIP.git
 pip install imbalanced-learn
 
@@ -11,7 +11,7 @@ EXP="Kaggle_ViTB32_LiteHiCroPL_4Stage_SmartPush_100Epochs"
 OUT="outputs/${EXP}-$(date +%m-%d-%H%M)"
 mkdir -p "${OUT}"
 
- echo "Starting Stable Training on Kaggle: ViT-B/32 + Lite-HiCroPL + 4-Stage Smart Push"
+echo "Starting Stable Training on Kaggle: ViT-B/32 + Lite-HiCroPL + 4-Stage Smart Push"
 
 # --- PATH CONFIGURATION ---
 # Adjust these paths if your Kaggle dataset structure is different
@@ -60,7 +60,7 @@ python main.py \
   \
   --epochs 100 \
   --batch-size 16 \
-  \
+  \  
   --lr 1e-3 \
   --lr-image-encoder 1e-6 \
   --lr-prompt-learner 1e-3 \
@@ -78,7 +78,7 @@ python main.py \
   --focal-gamma 2.0 \
   --unfreeze-visual-last-layer False \
   \
-  --stage1-epochs 5 \
+  --stage1-epochs 3 \
   --stage1-label-smoothing 0.05 \
   --stage1-smoothing-temp 0.15 \
   \
