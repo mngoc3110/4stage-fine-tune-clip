@@ -2,16 +2,16 @@
 set -e
 
 # --- SETUP ENVIRONMENT (Kaggle/Colab) ---
-echo "=> Installing dependencies..."
+ echo "=> Installing dependencies..."
 pip install git+https://github.com/openai/CLIP.git
 pip install imbalanced-learn
 
 # Experiment Name
-EXP="Kaggle_ViTB32_LiteHiCroPL_4Stage_BalancedPush_100Epochs"
+EXP="Kaggle_ViTB32_LiteHiCroPL_4Stage_SmartPush_100Epochs"
 OUT="outputs/${EXP}-$(date +%m-%d-%H%M)"
 mkdir -p "${OUT}"
 
-echo "Starting Stable Training on Kaggle: ViT-B/32 + Lite-HiCroPL + 4-Stage Balanced Push"
+ echo "Starting Stable Training on Kaggle: ViT-B/32 + Lite-HiCroPL + 4-Stage Smart Push"
 
 # --- PATH CONFIGURATION ---
 # Adjust these paths if your Kaggle dataset structure is different
@@ -81,15 +81,17 @@ python main.py \
   --stage1-smoothing-temp 0.15 \
   \
   --stage2-epochs 30 \
-  --stage2-logit-adjust-tau 0.2 \
-  --stage2-max-class-weight 1.5 \
+  --stage2-logit-adjust-tau 0.5 \
+  --stage2-max-class-weight 2.0 \
   --stage2-smoothing-temp 0.15 \
   --stage2-label-smoothing 0.1 \
   \
   --stage3-epochs 70 \
-  --stage3-logit-adjust-tau 0.5 \
-  --stage3-max-class-weight 3.0 \
+  --stage3-logit-adjust-tau 0.8 \
+  --stage3-max-class-weight 5.0 \
   --stage3-smoothing-temp 0.18 \
   \
-  --stage4-logit-adjust-tau 0.1 \
+  --stage4-logit-adjust-tau 0.2 \
   --stage4-max-class-weight 1.2
+
+# Note: Batch size increased to 16 since Kaggle GPUs (P100/T4) are stronger than Mac MPS.

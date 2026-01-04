@@ -47,6 +47,7 @@ exp_group.add_argument('--dataset', type=str, default='RAER', help='Name of the 
 exp_group.add_argument('--gpu', type=str, default='mps', help='ID of the GPU to use, or "mps"/"cpu".')
 exp_group.add_argument('--workers', type=int, default=4, help='Number of data loading workers.')
 exp_group.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility.')
+exp_group.add_argument('--resume', type=str, default=None, help='Path to latest checkpoint (model.pth) to resume training from.')
 
 # --- Data & Path ---
 path_group = parser.add_argument_group('Data & Path', 'Paths to datasets and pretrained models')
@@ -64,6 +65,7 @@ train_group = parser.add_argument_group('Training Control', 'Parameters to contr
 train_group.add_argument('--epochs', type=int, default=20, help='Total number of training epochs.')
 train_group.add_argument('--batch-size', type=int, default=8, help='Batch size for training and validation.')
 train_group.add_argument('--print-freq', type=int, default=10, help='Frequency of printing training logs.')
+train_group.add_argument('--use-baseline-config', type=str, default='False', choices=['True', 'False'], help='Use the simple, high-LR baseline configuration (no complex re-balancing).')
 
 # --- Optimizer & Learning Rate ---
 optim_group = parser.add_argument_group('Optimizer & LR', 'Hyperparameters for the optimizer and scheduler')
@@ -202,6 +204,22 @@ def calculate_weights(class_counts, max_weight):
 
 # ==================== Training Function ====================
 def run_training(args: argparse.Namespace) -> None:
+    # Check for Baseline Config Override
+    use_baseline = str(getattr(args, 'use_baseline_config', 'False')) == 'True'
+    if use_baseline:
+        print("\n" + "!"*50)
+        print("   >>> BASELINE CONFIG ENABLED: Overriding parameters <<<")
+        print("   LR: 0.01 | LR_Image: 1e-5 | No Weighted Sampler | No Logit Adj")
+        print("!"*50 + "\n")
+        args.lr = 0.01
+        args.lr_image_encoder = 1e-5
+        args.lr_prompt_learner = 0.001
+        args.logit_adjust_tau = 0.0
+        args.lambda_mi = 0.0
+        args.lambda_dc = 0.0
+        args.lambda_cons = 0.0
+        args.use_focal_loss = 'False'
+        
     # Paths for logging and saving
     log_txt_path = os.path.join(args.output_path, 'log.txt')
     log_curve_path = os.path.join(args.output_path, 'log.png')
@@ -209,9 +227,26 @@ def run_training(args: argparse.Namespace) -> None:
     checkpoint_path = os.path.join(args.output_path, 'model.pth')
     best_checkpoint_path = os.path.join(args.output_path, 'model_best.pth')        
     best_uar = 0.0
+    best_war = 0.0 # Initialize best_war here to avoid UnboundLocalError
     start_epoch = 0
     recorder = RecorderMeter(args.epochs)
-    
+
+    # Load checkpoint if resuming training
+    if args.resume:
+        if os.path.isfile(args.resume):
+            print(f"=> Loading checkpoint '{args.resume}'")
+            checkpoint = torch.load(args.resume, map_location=args.device)
+            start_epoch = checkpoint['epoch']
+            best_uar = checkpoint['best_acc'] # Assuming best_acc stores UAR
+            if 'best_war' in checkpoint:
+                best_war = checkpoint['best_war']
+            # Load recorder state (optional, if you want to continue plot/history)
+            if 'recorder' in checkpoint:
+                recorder = checkpoint['recorder']
+            print(f"=> Loaded checkpoint '{args.resume}' (epoch {checkpoint['epoch']})")
+        else:
+            print(f"=> No checkpoint found at '{args.resume}', starting from scratch.")
+            
     # --- STAGE 1 SETUP (Safe Base Learning) ---
     print("=> INITIALIZING STAGE 1: Warm-up (Epoch 0 - {})".format(args.stage1_epochs))
     # Standard Setup: No Weighted Sampler, No Weights, No Logit Adj
@@ -225,6 +260,8 @@ def run_training(args: argparse.Namespace) -> None:
     
     # Load data first to get class counts
     print("=> Building dataloaders (Stage 1: Random Shuffle)...")
+    # Force use_weighted_sampler=False if baseline config is active
+    force_random = use_baseline
     train_loader, val_loader, test_loader_final = build_dataloaders(args, use_weighted_sampler=False)
     print("=> Dataloaders built successfully.")
 
@@ -253,6 +290,13 @@ def run_training(args: argparse.Namespace) -> None:
     class_names, input_text = get_class_info(args)
     model = build_model(args, input_text)
     model = model.to(args.device)
+
+    # Load model state from checkpoint if resuming
+    if args.resume and os.path.isfile(args.resume):
+        checkpoint = torch.load(args.resume, map_location=args.device)
+        model.load_state_dict(checkpoint['state_dict'])
+        print(f"=> Model state loaded from '{args.resume}'")
+
     print("=> Model built and moved to device successfully.")
 
     # Loss and optimizer
@@ -271,8 +315,21 @@ def run_training(args: argparse.Namespace) -> None:
         {"params": model.project_fc.parameters(), "lr": args.lr_image_encoder}
     ], momentum=args.momentum, weight_decay=args.weight_decay)
 
+    # Load optimizer state from checkpoint if resuming
+    if args.resume and os.path.isfile(args.resume):
+        checkpoint = torch.load(args.resume, map_location=args.device)
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        print(f"=> Optimizer state loaded from '{args.resume}'")
+
     scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=args.milestones, gamma=args.gamma)
     
+    # Load scheduler state from checkpoint if resuming
+    if args.resume and os.path.isfile(args.resume):
+        checkpoint = torch.load(args.resume, map_location=args.device)
+        if 'scheduler' in checkpoint: # Scheduler might not always be saved
+            scheduler.load_state_dict(checkpoint['scheduler'])
+            print(f"=> Scheduler state loaded from '{args.resume}'")
+
     # Trainer
     trainer = Trainer(
         model, criterion, optimizer, scheduler, args.device,
@@ -282,113 +339,120 @@ def run_training(args: argparse.Namespace) -> None:
         class_names=class_names
     )
     
-    best_war = 0.0 # Track best WAR
+    # Re-evaluate start_epoch and best_uar/best_war if recorder was loaded.
+    # Otherwise, these would be initialized to 0.
+    if args.resume and os.path.isfile(args.resume) and 'recorder' in checkpoint:
+        # Assuming recorder might hold best_acc/best_war that are updated.
+        # Otherwise, manually set best_uar/best_war from loaded checkpoint if needed.
+        pass # The recorder from checkpoint is now active.
 
     for epoch in range(start_epoch, args.epochs):
         
-        # ==========================================
-        # 4-STAGE TRANSITION LOGIC (REFINED)
-        # ==========================================
-        
-        # --- Enter STAGE 2: DRW (Deferred Re-Weighting) ---
-        if epoch == args.stage1_epochs:
-            print("\n" + "="*50)
-            print(f"   >>> TRANSITIONING TO STAGE 2: DOUBLE RE-WEIGHTING (Epoch {epoch}) <<<")
-            print("="*50)
+        # Bypass stage logic if using baseline config
+        if not use_baseline:
+            # ==========================================
+            # 4-STAGE TRANSITION LOGIC (REFINED)
+            # ==========================================
             
-            # 1. Update Params
-            args.logit_adjust_tau = args.stage2_logit_adjust_tau
-            args.smoothing_temp = args.stage2_smoothing_temp
-            args.label_smoothing = args.stage2_label_smoothing
-            
-            # 2. Switch Sampler (Weighted)
-            print(f"   [Stage 2] Switching to WeightedRandomSampler (Max Weight {args.stage2_max_class_weight})...")
-            train_loader, val_loader, test_loader_final = build_dataloaders(args, use_weighted_sampler=True)
-            
-            # 3. Weights: ON (Double Reweighting Strategy) - Force the model to learn!
-            if class_counts is not None:
-                args.class_weights = calculate_weights(class_counts, args.stage2_max_class_weight)
-                print(f"   [Stage 2] Class Weights: ON (Double Penalty Active). Weights: {np.round(args.class_weights, 4)}")
-            
-            # 4. Ramp up MI/DC
-            print(f"   [Stage 2] Ramping up MI/DC Loss...")
-            criterion.lambda_mi = original_lambda_mi
-            criterion.lambda_dc = original_lambda_dc
-            
-            # 5. Update Criterion
-            criterion.logit_adjust_tau = args.logit_adjust_tau
-            criterion.smoothing_temp = args.smoothing_temp
-            criterion.label_smoothing = args.label_smoothing
-            
-            # Apply Weights explicitly
-            if args.class_weights is not None:
-                new_weights = torch.tensor(args.class_weights, dtype=torch.float32).to(args.device)
-                criterion.class_weights = new_weights
-                if criterion.ce_loss is not None:
-                    criterion.ce_loss.weight = new_weights
-                    criterion.ce_loss.label_smoothing = args.label_smoothing
-            
-            # Ensure Priors for Logit Adj
-            if criterion.class_priors is None and class_counts is not None:
-                counts_t = torch.tensor(class_counts, dtype=torch.float32).to(args.device)
-                priors = counts_t / counts_t.sum()
-                criterion.register_buffer("class_priors", priors)
-            
-            print("   [Stage 2] Transition Complete.\n")
+            # --- Enter STAGE 2: DRW (Deferred Re-Weighting) ---
+            if epoch == args.stage1_epochs:
+                print("\n" + "="*50)
+                print(f"   >>> TRANSITIONING TO STAGE 2: DOUBLE RE-WEIGHTING (Epoch {epoch}) <<<")
+                print("="*50)
+                
+                # 1. Update Params
+                args.logit_adjust_tau = args.stage2_logit_adjust_tau
+                args.smoothing_temp = args.stage2_smoothing_temp
+                args.label_smoothing = args.stage2_label_smoothing
+                
+                # 2. Switch Sampler (Weighted)
+                print(f"   [Stage 2] Switching to WeightedRandomSampler (Max Weight {args.stage2_max_class_weight})...")
+                train_loader, val_loader, test_loader_final = build_dataloaders(args, use_weighted_sampler=True)
+                
+                # 3. Weights: ON (Double Reweighting Strategy) - Force the model to learn!
+                if class_counts is not None:
+                    args.class_weights = calculate_weights(class_counts, args.stage2_max_class_weight)
+                    print(f"   [Stage 2] Class Weights: ON (Double Penalty Active). Weights: {np.round(args.class_weights, 4)}")
+                
+                # 4. Ramp up MI/DC
+                print(f"   [Stage 2] Ramping up MI/DC Loss...")
+                criterion.lambda_mi = original_lambda_mi
+                criterion.lambda_dc = original_lambda_dc
+                
+                # 5. Update Criterion
+                criterion.logit_adjust_tau = args.logit_adjust_tau
+                criterion.smoothing_temp = args.smoothing_temp
+                criterion.label_smoothing = args.label_smoothing
+                
+                # Apply Weights explicitly
+                if args.class_weights is not None:
+                    new_weights = torch.tensor(args.class_weights, dtype=torch.float32).to(args.device)
+                    criterion.class_weights = new_weights
+                    if criterion.ce_loss is not None:
+                        criterion.ce_loss.weight = new_weights
+                        criterion.ce_loss.label_smoothing = args.label_smoothing
+                
+                # Ensure Priors for Logit Adj
+                if criterion.class_priors is None and class_counts is not None:
+                    counts_t = torch.tensor(class_counts, dtype=torch.float32).to(args.device)
+                    priors = counts_t / counts_t.sum()
+                    criterion.register_buffer("class_priors", priors)
+                
+                print("   [Stage 2] Transition Complete.\n")
 
-        # --- Enter STAGE 3: Targeted Push ---
-        elif epoch == args.stage2_epochs:
-            print("\n" + "="*50)
-            print(f"   >>> TRANSITIONING TO STAGE 3: AGGRESSIVE DOUBLE PUSH (Epoch {epoch}) <<<")
-            print("="*50)
-            
-            # 1. Update Params (Aggressive)
-            args.logit_adjust_tau = args.stage3_logit_adjust_tau
-            args.smoothing_temp = args.stage3_smoothing_temp 
-            
-            # 2. Update Sampler
-            print(f"   [Stage 3] Updating WeightedRandomSampler (Max Weight {args.stage3_max_class_weight})...")
-            args.stage2_max_class_weight = args.stage3_max_class_weight 
-            train_loader, val_loader, test_loader_final = build_dataloaders(args, use_weighted_sampler=True)
-            
-            # 3. Weights: ON (Stronger)
-            if class_counts is not None:
-                args.class_weights = calculate_weights(class_counts, args.stage3_max_class_weight)
-                print(f"   [Stage 3] Class Weights: MAXIMUM PENALTY. Weights: {np.round(args.class_weights, 4)}")
-            
-            # 4. Update Criterion
-            criterion.logit_adjust_tau = args.logit_adjust_tau
-            criterion.smoothing_temp = args.smoothing_temp
-            
-            if args.class_weights is not None:
-                new_weights = torch.tensor(args.class_weights, dtype=torch.float32).to(args.device)
-                criterion.class_weights = new_weights
-                if criterion.ce_loss is not None:
-                    criterion.ce_loss.weight = new_weights
+            # --- Enter STAGE 3: Targeted Push ---
+            elif epoch == args.stage2_epochs:
+                print("\n" + "="*50)
+                print(f"   >>> TRANSITIONING TO STAGE 3: AGGRESSIVE DOUBLE PUSH (Epoch {epoch}) <<<")
+                print("="*50)
+                
+                # 1. Update Params (Aggressive)
+                args.logit_adjust_tau = args.stage3_logit_adjust_tau
+                args.smoothing_temp = args.stage3_smoothing_temp 
+                
+                # 2. Update Sampler
+                print(f"   [Stage 3] Updating WeightedRandomSampler (Max Weight {args.stage3_max_class_weight})...")
+                args.stage2_max_class_weight = args.stage3_max_class_weight 
+                train_loader, val_loader, test_loader_final = build_dataloaders(args, use_weighted_sampler=True)
+                
+                # 3. Weights: ON (Stronger)
+                if class_counts is not None:
+                    args.class_weights = calculate_weights(class_counts, args.stage3_max_class_weight)
+                    print(f"   [Stage 3] Class Weights: MAXIMUM PENALTY. Weights: {np.round(args.class_weights, 4)}")
+                
+                # 4. Update Criterion
+                criterion.logit_adjust_tau = args.logit_adjust_tau
+                criterion.smoothing_temp = args.smoothing_temp
+                
+                if args.class_weights is not None:
+                    new_weights = torch.tensor(args.class_weights, dtype=torch.float32).to(args.device)
+                    criterion.class_weights = new_weights
+                    if criterion.ce_loss is not None:
+                        criterion.ce_loss.weight = new_weights
 
-            print("   [Stage 3] Transition Complete.\n")
+                print("   [Stage 3] Transition Complete.\n")
 
-        # --- Enter STAGE 4: Cooldown & Polish ---
-        elif epoch == args.stage3_epochs:
-            print("\n" + "="*50)
-            print(f"   >>> TRANSITIONING TO STAGE 4: Cooldown & Polish (Epoch {epoch}) <<<")
-            print("="*50)
-            
-            # 1. Update Params (Stable)
-            args.logit_adjust_tau = args.stage4_logit_adjust_tau
-            
-            # 2. Update Sampler (Cap 2.0 - Reduced)
-            print(f"   [Stage 4] Reducing WeightedRandomSampler (Max Weight {args.stage4_max_class_weight})...")
-            args.stage2_max_class_weight = args.stage4_max_class_weight
-            train_loader, val_loader, test_loader_final = build_dataloaders(args, use_weighted_sampler=True)
-            
-            # 3. Weights: Still OFF
-            
-            # 4. Update Criterion
-            criterion.logit_adjust_tau = args.logit_adjust_tau
-            # Temp can stay or reduce slightly, keeping it stable
-            
-            print("   [Stage 4] Transition Complete. LR should be decaying now.\n")
+            # --- Enter STAGE 4: Cooldown & Polish ---
+            elif epoch == args.stage3_epochs:
+                print("\n" + "="*50)
+                print(f"   >>> TRANSITIONING TO STAGE 4: Cooldown & Polish (Epoch {epoch}) <<<")
+                print("="*50)
+                
+                # 1. Update Params (Stable)
+                args.logit_adjust_tau = args.stage4_logit_adjust_tau
+                
+                # 2. Update Sampler (Cap 2.0 - Reduced)
+                print(f"   [Stage 4] Reducing WeightedRandomSampler (Max Weight {args.stage4_max_class_weight})...")
+                args.stage2_max_class_weight = args.stage4_max_class_weight
+                train_loader, val_loader, test_loader_final = build_dataloaders(args, use_weighted_sampler=True)
+                
+                # 3. Weights: Still OFF
+                
+                # 4. Update Criterion
+                criterion.logit_adjust_tau = args.logit_adjust_tau
+                # Temp can stay or reduce slightly, keeping it stable
+                
+                print("   [Stage 4] Transition Complete. LR should be decaying now.\n")
 
         inf = f'******************** Epoch: {epoch} ********************'
         start_time = time.time()

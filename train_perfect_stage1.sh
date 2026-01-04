@@ -2,11 +2,11 @@
 set -e
 
 # Experiment Name: ViTB32 + Focal + StrongHead + StrongerSemanticSemanticSmoothing
-EXP="ViTB32_LiteHiCroPL_4Stage_SmartPush_100Epochs"
+EXP="ViTB32_LiteHiCroPL_4Stage_BalancedPush_100Epochs"
 OUT="outputs/${EXP}-$(date +%m-%d-%H%M)"
 mkdir -p "${OUT}"
 
-echo "Starting Stable Training: ViT-B/32 + Lite-HiCroPL + 4-Stage Smart Push (100 Epochs)"
+echo "Starting Stable Training: ViT-B/32 + Lite-HiCroPL + 4-Stage Balanced Push (100 Epochs)"
 
 python main.py \
   --mode train \
@@ -56,21 +56,21 @@ python main.py \
   --stage1-smoothing-temp 0.15 \
   \
   --stage2-epochs 30 \
-  --stage2-logit-adjust-tau 0.5 \
-  --stage2-max-class-weight 2.0 \
+  --stage2-logit-adjust-tau 0.2 \
+  --stage2-max-class-weight 1.5 \
   --stage2-smoothing-temp 0.15 \
   --stage2-label-smoothing 0.1 \
   \
   --stage3-epochs 70 \
-  --stage3-logit-adjust-tau 0.8 \
-  --stage3-max-class-weight 5.0 \
+  --stage3-logit-adjust-tau 0.5 \
+  --stage3-max-class-weight 3.0 \
   --stage3-smoothing-temp 0.18 \
   \
-  --stage4-logit-adjust-tau 0.2 \
+  --stage4-logit-adjust-tau 0.1 \
   --stage4-max-class-weight 1.2
 
-# 4-Stage "Smart Push" Strategy with Lite-HiCroPL:
+# 4-Stage "Balanced Push" Strategy with Lite-HiCroPL:
 # Stage 1 (0-5): Warmup.
-# Stage 2 (6-30): Intro Minority (Weight 2.0).
-# Stage 3 (31-70): Aggressive but Controlled (Weight 5.0, Tau 0.8).
-# Stage 4 (71-100): Gentle Cooldown (Weight 1.2, Tau 0.2). 
+# Stage 2 (6-30): Intro Minority (Weight 1.5, Tau 0.2).
+# Stage 3 (31-70): Moderate Push (Weight 3.0, Tau 0.5).
+# Stage 4 (71-100): Gentle Cooldown (Weight 1.2, Tau 0.1). 

@@ -266,10 +266,10 @@ def collate_fn_ignore_none(batch):
 
 def train_data_loader(list_file, num_segments, duration, image_size,dataset_name,bounding_box_face,bounding_box_body, root_dir, data_percentage: float = 1.0):
     if dataset_name == "RAER":
+         # Reverted to Baseline-style Gentle Augmentation to preserve features and Aspect Ratio
          train_transforms = torchvision.transforms.Compose([
-            GroupTransform(torchvision.transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1)), # Increased Jitter
-            RandomRotation(15), # Increased Rotation
-            GroupRandomSizedCrop(image_size), # Changed Resize to RandomSizedCrop for geometric variation
+            RandomRotation(4), # Reduced from 30/15 back to 4 (Baseline)
+            GroupResize(image_size), # Changed back to Resize (Baseline) from RandomSizedCrop to avoid squashing/cropping
             GroupRandomHorizontalFlip(),
             Stack(),
             ToTorchFormatTensor()])
