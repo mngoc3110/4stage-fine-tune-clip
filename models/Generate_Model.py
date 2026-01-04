@@ -5,6 +5,7 @@ from models.mi_estimator import MIEstimator
 from clip import clip
 import torch
 import torch.nn.functional as F
+from models.Text import get_hierarchical_prompts # Import helper
 
 class CrossAttention(nn.Module):
     def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):
@@ -44,6 +45,7 @@ class GenerateModel(nn.Module):
     def __init__(self, input_text, clip_model, args):
         super().__init__()
         self.args = args
+        self.use_hierarchical_prompt = str(getattr(args, 'use_hierarchical_prompt', 'False')) == 'True'
 
         # --- Prompts ---
         self.prompt_learner = PromptLearner(input_text, clip_model, args)
@@ -52,6 +54,41 @@ class GenerateModel(nn.Module):
         # Tokenize on CPU first (since clip_model is on CPU during init)
         tokenized_prompts = clip.tokenize(self.hand_crafted_prompts)
         self.register_buffer("tokenized_hand_crafted_prompts", tokenized_prompts)
+
+        # --- Hierarchical Prompts (Lite-HiCroPL) ---
+        if self.use_hierarchical_prompt:
+            print("   [Model] Initializing Lite-HiCroPL (3-Level Ensemble)...")
+            hier_prompts = get_hierarchical_prompts()
+            self.prompts_l1 = hier_prompts['level1']
+            self.prompts_l2 = hier_prompts['level2']
+            self.prompts_l3 = hier_prompts['level3']
+            
+            self.tokenized_l1 = clip.tokenize(self.prompts_l1)
+            self.tokenized_l2 = clip.tokenize(self.prompts_l2)
+            self.tokenized_l3 = clip.tokenize(self.prompts_l3)
+            
+            self.register_buffer("tokenized_prompts_l1", self.tokenized_l1)
+            self.register_buffer("tokenized_prompts_l2", self.tokenized_l2)
+            self.register_buffer("tokenized_prompts_l3", self.tokenized_l3)
+            
+            # Pre-compute fixed embeddings for these levels (since they are hand-crafted/frozen for now)
+            # Or if you want to make them learnable, you'd need multiple PromptLearners.
+            # For "Lite" version, we keep them fixed or use the main learnable prompt for L3 and fixed for L1/L2.
+            # To keep it simple and consistent with "Hand-crafted branch": We treat these as auxiliary fixed prompts 
+            # that ensemble with the main learnable branch.
+            
+            # Actually, to maximize impact, let's pre-compute their embeddings (frozen) 
+            # and ensemble them into the 'hand_crafted' branch OR add them to the main logits.
+            # Let's ensemble them into the main decision process.
+            with torch.no_grad():
+                self.embed_l1 = clip_model.token_embedding(self.tokenized_l1).type(clip_model.dtype)
+                self.embed_l2 = clip_model.token_embedding(self.tokenized_l2).type(clip_model.dtype)
+                self.embed_l3 = clip_model.token_embedding(self.tokenized_l3).type(clip_model.dtype)
+            
+            self.register_buffer("fixed_embed_l1", self.embed_l1)
+            self.register_buffer("fixed_embed_l2", self.embed_l2)
+            self.register_buffer("fixed_embed_l3", self.embed_l3)
+
 
         # --- Encoders ---
         self.text_encoder = TextEncoder(clip_model)
@@ -177,7 +214,45 @@ class GenerateModel(nn.Module):
         if self.tau and self.tau > 0:
             scale = torch.tensor(1.0 / self.tau, device=video_features.device, dtype=video_features.dtype)
 
+        # Main Logits (Learnable)
         logits_learnable = scale * (video_features @ learnable_text_features.t())
+        
+        # --- Lite-HiCroPL Ensemble ---
+        if self.use_hierarchical_prompt:
+            # Compute features for 3 levels (Fixed prompts for now to keep compute low)
+            # Level 1: Visual
+            feat_l1 = self.text_encoder(self.fixed_embed_l1, self.tokenized_prompts_l1)
+            feat_l1 = feat_l1 / (feat_l1.norm(dim=-1, keepdim=True) + 1e-6)
+            
+            # Level 2: Action
+            feat_l2 = self.text_encoder(self.fixed_embed_l2, self.tokenized_prompts_l2)
+            feat_l2 = feat_l2 / (feat_l2.norm(dim=-1, keepdim=True) + 1e-6)
+            
+            # Level 3: Abstract
+            feat_l3 = self.text_encoder(self.fixed_embed_l3, self.tokenized_prompts_l3)
+            feat_l3 = feat_l3 / (feat_l3.norm(dim=-1, keepdim=True) + 1e-6)
+            
+            # Ensure dtype
+            if feat_l1.dtype != video_features.dtype:
+                feat_l1 = feat_l1.to(video_features.dtype)
+                feat_l2 = feat_l2.to(video_features.dtype)
+                feat_l3 = feat_l3.to(video_features.dtype)
+            
+            # Compute Logits
+            logits_l1 = scale * (video_features @ feat_l1.t())
+            logits_l2 = scale * (video_features @ feat_l2.t())
+            logits_l3 = scale * (video_features @ feat_l3.t())
+            
+            # Ensemble: Weighted sum
+            # We can give slightly more weight to the learnable part, or treat all equally.
+            # Strategy: Learnable (Main) + L1 (Visual) + L2 (Action) + L3 (Abstract)
+            # Let's average them to keep scale consistent
+            
+            # Ensemble with the main learnable logits
+            # logits_learnable = 0.4 * logits_learnable + 0.2 * logits_l1 + 0.2 * logits_l2 + 0.2 * logits_l3
+            # Or simpler:
+            logits_learnable = (logits_learnable + logits_l1 + logits_l2 + logits_l3) / 4.0
+
         probs_learnable = F.softmax(logits_learnable, dim=-1)
 
         if self.use_handcrafted_branch and hand_crafted_text_features is not None:

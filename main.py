@@ -88,6 +88,7 @@ model_group.add_argument('--duration', type=int, default=1, help='Duration of ea
 model_group.add_argument('--image-size', type=int, default=224, help='Size to resize input images to.')
 model_group.add_argument('--unfreeze-visual-last-layer', type=str, default='False', choices=['True', 'False'], help='Unfreeze the last layer of the visual encoder for fine-tuning.')
 model_group.add_argument('--use-multi-scale', type=str, default='False', choices=['True', 'False'], help='Use multi-scale input (Face + Body/Global) for better feature extraction.')
+model_group.add_argument('--use-hierarchical-prompt', type=str, default='False', choices=['True', 'False'], help='Enable Lite-HiCroPL 3-level prompt ensemble.')
 
 # --- Loss & Regularization ---
 loss_group = parser.add_argument_group('Loss & Regularization', 'Hyperparameters for loss functions and regularization')
@@ -291,7 +292,7 @@ def run_training(args: argparse.Namespace) -> None:
         # --- Enter STAGE 2: DRW (Deferred Re-Weighting) ---
         if epoch == args.stage1_epochs:
             print("\n" + "="*50)
-            print(f"   >>> TRANSITIONING TO STAGE 2: DRW - Weighted Sampler (Epoch {epoch}) <<<")
+            print(f"   >>> TRANSITIONING TO STAGE 2: DOUBLE RE-WEIGHTING (Epoch {epoch}) <<<")
             print("="*50)
             
             # 1. Update Params
@@ -299,15 +300,14 @@ def run_training(args: argparse.Namespace) -> None:
             args.smoothing_temp = args.stage2_smoothing_temp
             args.label_smoothing = args.stage2_label_smoothing
             
-            # 2. Switch Sampler (Weighted, Cap 2.0)
+            # 2. Switch Sampler (Weighted)
             print(f"   [Stage 2] Switching to WeightedRandomSampler (Max Weight {args.stage2_max_class_weight})...")
-            # We pass stage2_max_class_weight via args to build_dataloaders implicitly or we need to update args first
-            # The build_dataloaders function uses args.stage2_max_class_weight if present.
             train_loader, val_loader, test_loader_final = build_dataloaders(args, use_weighted_sampler=True)
             
-            # 3. Weights: OFF (Avoid Double Reweighting)
-            print(f"   [Stage 2] Class Weights: OFF (Handled by Sampler)")
-            args.class_weights = None
+            # 3. Weights: ON (Double Reweighting Strategy) - Force the model to learn!
+            if class_counts is not None:
+                args.class_weights = calculate_weights(class_counts, args.stage2_max_class_weight)
+                print(f"   [Stage 2] Class Weights: ON (Double Penalty Active). Weights: {np.round(args.class_weights, 4)}")
             
             # 4. Ramp up MI/DC
             print(f"   [Stage 2] Ramping up MI/DC Loss...")
@@ -318,10 +318,14 @@ def run_training(args: argparse.Namespace) -> None:
             criterion.logit_adjust_tau = args.logit_adjust_tau
             criterion.smoothing_temp = args.smoothing_temp
             criterion.label_smoothing = args.label_smoothing
-            criterion.class_weights = None # Explicitly set to None
-            if criterion.ce_loss is not None:
-                criterion.ce_loss.weight = None
-                criterion.ce_loss.label_smoothing = args.label_smoothing
+            
+            # Apply Weights explicitly
+            if args.class_weights is not None:
+                new_weights = torch.tensor(args.class_weights, dtype=torch.float32).to(args.device)
+                criterion.class_weights = new_weights
+                if criterion.ce_loss is not None:
+                    criterion.ce_loss.weight = new_weights
+                    criterion.ce_loss.label_smoothing = args.label_smoothing
             
             # Ensure Priors for Logit Adj
             if criterion.class_priors is None and class_counts is not None:
@@ -334,27 +338,32 @@ def run_training(args: argparse.Namespace) -> None:
         # --- Enter STAGE 3: Targeted Push ---
         elif epoch == args.stage2_epochs:
             print("\n" + "="*50)
-            print(f"   >>> TRANSITIONING TO STAGE 3: Targeted Push (Epoch {epoch}) <<<")
+            print(f"   >>> TRANSITIONING TO STAGE 3: AGGRESSIVE DOUBLE PUSH (Epoch {epoch}) <<<")
             print("="*50)
             
-            # 1. Update Params (Aggressive but Controlled)
+            # 1. Update Params (Aggressive)
             args.logit_adjust_tau = args.stage3_logit_adjust_tau
-            args.smoothing_temp = args.stage3_smoothing_temp # Increased to 0.18 to separate classes
+            args.smoothing_temp = args.stage3_smoothing_temp 
             
-            # 2. Update Sampler (Cap 2.5)
-            # We need to rebuild dataloader to update sampler weights cap
+            # 2. Update Sampler
             print(f"   [Stage 3] Updating WeightedRandomSampler (Max Weight {args.stage3_max_class_weight})...")
-            # Temporarily overwrite stage2_max_class_weight logic in build_dataloaders or just pass the arg correctly
-            # We will hack it slightly by updating the arg used by build_dataloaders
             args.stage2_max_class_weight = args.stage3_max_class_weight 
             train_loader, val_loader, test_loader_final = build_dataloaders(args, use_weighted_sampler=True)
             
-            # 3. Weights: Still OFF
+            # 3. Weights: ON (Stronger)
+            if class_counts is not None:
+                args.class_weights = calculate_weights(class_counts, args.stage3_max_class_weight)
+                print(f"   [Stage 3] Class Weights: MAXIMUM PENALTY. Weights: {np.round(args.class_weights, 4)}")
             
             # 4. Update Criterion
             criterion.logit_adjust_tau = args.logit_adjust_tau
             criterion.smoothing_temp = args.smoothing_temp
-            # Class weights remain None
+            
+            if args.class_weights is not None:
+                new_weights = torch.tensor(args.class_weights, dtype=torch.float32).to(args.device)
+                criterion.class_weights = new_weights
+                if criterion.ce_loss is not None:
+                    criterion.ce_loss.weight = new_weights
 
             print("   [Stage 3] Transition Complete.\n")
 

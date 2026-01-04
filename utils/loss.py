@@ -52,10 +52,11 @@ class FocalLoss(nn.Module):
 
 class CLIPCAERLoss(nn.Module):
     """
-    L = CE/Focal + w_mi(epoch)*MI + w_dc(epoch)*DC
+    L = CE/Focal + w_mi(epoch)*MI + w_dc(epoch)*DC + w_cons*Consistency
     - CE: optional label smoothing OR semantic label smoothing (LDLVA-inspired)
     - MI: InfoNCE-ish using your mi_estimator(pos-neg)
     - DC: KL( P_joint || P_l ⊗ P_h ) theo paper, tính từ logits 2 view
+    - Cons: KL( Learnable || Hand-crafted ) để giữ kiến thức gốc
     """
 
     def __init__(self, args, mi_estimator=None, num_classes=5):
@@ -66,6 +67,7 @@ class CLIPCAERLoss(nn.Module):
         # base lambdas (max weight)
         self.lambda_mi = float(getattr(args, "lambda_mi", 1.0))
         self.lambda_dc = float(getattr(args, "lambda_dc", 0.0))
+        self.lambda_cons = float(getattr(args, "lambda_cons", 0.0)) # New Consistency Loss weight
 
         # warmup/ramp
         self.mi_warmup = int(getattr(args, "mi_warmup", 0))
@@ -196,6 +198,23 @@ class CLIPCAERLoss(nn.Module):
         dc = (P * (torch.log(P) - torch.log(P_l) - torch.log(P_h))).sum()
         return dc
     
+    # ---------------- Consistency ----------------
+    def _consistency_loss(self, logits_learnable, logits_frozen, T=1.0):
+        """
+        KL Divergence between Learnable Logits and Frozen (Hand-crafted) Logits.
+        Helps prevent the model from deviating too far from CLIP's original knowledge.
+        """
+        if logits_frozen is None or self.lambda_cons == 0.0:
+            return torch.tensor(0.0, device=logits_learnable.device)
+        
+        # Softmax with temperature
+        p_frozen = F.softmax(logits_frozen / T, dim=1)
+        log_p_learnable = F.log_softmax(logits_learnable / T, dim=1)
+        
+        # KL(frozen || learnable) -> we want learnable to match frozen's distribution structure
+        loss = F.kl_div(log_p_learnable, p_frozen, reduction='batchmean') * (T**2)
+        return loss
+
     # ---------------- Semantic Smoothing ----------------
     def _compute_semantic_target(self, targets, hand_crafted_text_features):
         """
@@ -252,8 +271,13 @@ class CLIPCAERLoss(nn.Module):
         # --- Logit Clamping (Safety) ---
         # Clamp logits to avoid overflow in exp() during softmax
         logits = torch.clamp(logits, min=-30.0, max=30.0)
+        # Only clamp logits_hand if it exists
         if logits_hand is not None:
             logits_hand = torch.clamp(logits_hand, min=-30.0, max=30.0)
+        
+        # --- Consistency Loss (New) ---
+        # Calculate consistency BEFORE Logit Adjustment to preserve raw knowledge
+        cons_loss = self._consistency_loss(logits, logits_hand) * self.lambda_cons
         
         # --- Logit Adjustment (Menon et al., 2020) ---
         # Correct formula: logits = logits - tau * log(priors)
@@ -300,13 +324,14 @@ class CLIPCAERLoss(nn.Module):
         mi = self._mi_loss(learnable_text_features, hand_crafted_text_features)
         dc = self._dc_loss(logits, logits_hand)
 
-        total = ce + self.last_w_mi * mi + self.last_w_dc * dc
+        total = ce + self.last_w_mi * mi + self.last_w_dc * dc + cons_loss
 
         return {
             "total": total,
             "ce": ce,
             "mi": mi,
             "dc": dc,
+            "cons": cons_loss, # Add to return dict
             "w_mi": float(self.last_w_mi),
             "w_dc": float(self.last_w_dc),
         }
