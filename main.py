@@ -236,7 +236,7 @@ def run_training(args: argparse.Namespace) -> None:
     if args.resume:
         if os.path.isfile(args.resume):
             print(f"=> Loading checkpoint '{args.resume}'")
-            checkpoint = torch.load(args.resume, map_location=args.device)
+            checkpoint = torch.load(args.resume, map_location=args.device, weights_only=False) # ADDED weights_only=False
             start_epoch = checkpoint['epoch']
             best_uar = checkpoint['best_acc'] # Assuming best_acc stores UAR
             if 'best_war' in checkpoint:
@@ -294,7 +294,7 @@ def run_training(args: argparse.Namespace) -> None:
 
     # Load model state from checkpoint if resuming
     if args.resume and os.path.isfile(args.resume):
-        checkpoint = torch.load(args.resume, map_location=args.device)
+        checkpoint = torch.load(args.resume, map_location=args.device, weights_only=False) # ADDED weights_only=False
         model.load_state_dict(checkpoint['state_dict'])
         print(f"=> Model state loaded from '{args.resume}'")
 
@@ -318,7 +318,7 @@ def run_training(args: argparse.Namespace) -> None:
 
     # Load optimizer state from checkpoint if resuming
     if args.resume and os.path.isfile(args.resume):
-        checkpoint = torch.load(args.resume, map_location=args.device)
+        checkpoint = torch.load(args.resume, map_location=args.device, weights_only=False) # ADDED weights_only=False
         optimizer.load_state_dict(checkpoint['optimizer'])
         print(f"=> Optimizer state loaded from '{args.resume}'")
 
@@ -326,7 +326,7 @@ def run_training(args: argparse.Namespace) -> None:
     
     # Load scheduler state from checkpoint if resuming
     if args.resume and os.path.isfile(args.resume):
-        checkpoint = torch.load(args.resume, map_location=args.device)
+        checkpoint = torch.load(args.resume, map_location=args.device, weights_only=False) # ADDED weights_only=False
         if 'scheduler' in checkpoint: # Scheduler might not always be saved
             scheduler.load_state_dict(checkpoint['scheduler'])
             print(f"=> Scheduler state loaded from '{args.resume}'")
