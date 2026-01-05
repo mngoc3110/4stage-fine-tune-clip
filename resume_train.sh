@@ -93,5 +93,5 @@ python main.py \
   --stage3-max-class-weight 5.0 \
   --stage3-smoothing-temp 0.18 \
   \
-  --stage4-logit-adjust-tau 0.5 \
-  --stage4-max-class-weight 2.5
+  --stage4-logit-adjust-tau 0.0 \
+  --stage4-max-class-weight 1.5
