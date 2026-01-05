@@ -46,7 +46,7 @@ python main.py \
   --val-annotation "${VAL_TXT}" \
   --test-annotation "${TEST_TXT}" \
   --bounding-box-face "${FACE_BOX}" \
-  --bounding-box-body "${BODY_BOX}" \
+  --bounding_box-body "${BODY_BOX}" \
   \
   --clip-path "${CLIP_PATH}" \
   --text-type class_descriptor \
@@ -63,7 +63,7 @@ python main.py \
   \  
   --lr 1e-3 \
   --lr-image-encoder 1e-6 \
-  --lr-prompt-learner 1e-3 \
+  --lr-prompt-learner 5e-4 \
   --milestones 70 90 \
   --gamma 0.1 \
   \
