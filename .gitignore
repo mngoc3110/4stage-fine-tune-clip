@@ -3,9 +3,7 @@ __pycache__/
 .DS_Store
 .idea/
 .vscode/
-outputs/
 weights/
 RAER/
-*.pth
 *.zip
 *.gz
