@@ -7,4 +7,4 @@ weights/
 RAER/
 *.zip
 *.gz
-outputs/
+outputs/*.pth
