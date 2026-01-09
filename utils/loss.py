@@ -269,48 +269,50 @@ class CLIPCAERLoss(nn.Module):
              priors = self.class_priors.to(logits.device)
              logits = logits - self.logit_adjust_tau * torch.log(priors + 1e-8)
 
-        # --- ✅ START: LOGIC LOSS CHÍNH ĐÃ ĐƯỢC CẬP NHẬT ---
-        if self.ce_loss is not None or (self.semantic_smoothing and self.label_smoothing > 0.0): # Hợp nhất logic tính CE
-            
-            # --- Cost-Sensitive Path ---
-            if self.cost_matrix is not None:
-                # Tính loss trên từng sample (per-sample loss)
-                if self.use_focal_loss:
-                    ce_loss_none = F.cross_entropy(logits, targets, reduction='none', weight=self.class_weights, label_smoothing=self.label_smoothing)
-                    pt = torch.exp(-ce_loss_none)
-                    per_sample_loss = ((1 - pt) ** self.focal_gamma) * ce_loss_none
-                else: # Standard CE
-                    per_sample_loss = F.cross_entropy(logits, targets, weight=self.class_weights, label_smoothing=self.label_smoothing, reduction='none')
+        # --- ✅ START: Cập nhật logic tính Loss chính (FIXED) ---
 
-                # Lấy dự đoán và áp dụng cost
-                with torch.no_grad():
-                    preds = logits.argmax(dim=1)
-                    # Lấy cost tương ứng với cặp (target, pred)
-                    costs = self.cost_matrix[targets, preds]
-                
-                # Áp dụng cost và tính trung bình
-                ce = (per_sample_loss * costs).mean()
+        # Ưu tiên 1: Cost-Sensitive Path
+        if self.cost_matrix is not None:
+            # Tính loss trên từng sample (per-sample loss)
+            if self.use_focal_loss:
+                ce_loss_none = F.cross_entropy(logits, targets, reduction='none', weight=self.class_weights, label_smoothing=self.label_smoothing)
+                pt = torch.exp(-ce_loss_none)
+                per_sample_loss = ((1 - pt) ** self.focal_gamma) * ce_loss_none
+            else: # Standard CE
+                per_sample_loss = F.cross_entropy(logits, targets, weight=self.class_weights, label_smoothing=self.label_smoothing, reduction='none')
 
-            # --- Semantic Smoothing Path ---
-            elif self.semantic_smoothing and self.label_smoothing > 0.0 and hand_crafted_text_features is not None:
-                if hand_crafted_text_features.dtype != torch.float32:
-                    hand_crafted_text_features = hand_crafted_text_features.float()
-                soft_targets = self._compute_semantic_target(targets, hand_crafted_text_features)
-                log_probs = F.log_softmax(logits, dim=1)
-                if self.class_weights is not None:
-                    sample_weights = self.class_weights[targets]
-                    per_sample_loss = -torch.sum(soft_targets * log_probs, dim=1)
-                    ce = (per_sample_loss * sample_weights).mean()
-                else:
-                    ce = -torch.sum(soft_targets * log_probs, dim=1).mean()
+            # Lấy dự đoán và áp dụng cost
+            with torch.no_grad():
+                preds = logits.argmax(dim=1)
+                costs = self.cost_matrix[targets, preds]
             
-            # --- Standard Path (no cost, no semantic) ---
+            # Áp dụng cost và tính trung bình
+            ce = (per_sample_loss * costs).mean()
+
+        # Ưu tiên 2: Semantic Smoothing Path
+        elif self.semantic_smoothing and self.label_smoothing > 0.0 and hand_crafted_text_features is not None:
+            if hand_crafted_text_features.dtype != torch.float32:
+                hand_crafted_text_features = hand_crafted_text_features.float()
+            soft_targets = self._compute_semantic_target(targets, hand_crafted_text_features)
+            log_probs = F.log_softmax(logits, dim=1)
+            
+            if self.class_weights is not None:
+                sample_weights = self.class_weights[targets]
+                per_sample_loss = -torch.sum(soft_targets * log_probs, dim=1)
+                ce = (per_sample_loss * sample_weights).mean()
             else:
-                ce = self.ce_loss(logits, targets)
+                ce = -torch.sum(soft_targets * log_probs, dim=1).mean()
+        
+        # Ưu tiên 3: Standard Path (Focal or CE)
+        elif self.ce_loss is not None:
+            ce = self.ce_loss(logits, targets)
 
-        else: # Fallback
+        # Ưu tiên 4: Fallback an toàn
+        else:
+            # Trường hợp này xảy ra nếu semantic_smoothing=True nhưng hand_crafted_text_features is None
             ce = F.cross_entropy(logits, targets, label_smoothing=self.label_smoothing, weight=self.class_weights)
-        # --- ✅ END: LOGIC LOSS CHÍNH ---
+        
+        # --- ✅ END: Cập nhật logic tính Loss chính ---
 
         mi = self._mi_loss(learnable_text_features, hand_crafted_text_features)
         dc = self._dc_loss(logits, logits_hand)
