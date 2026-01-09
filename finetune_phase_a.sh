@@ -6,7 +6,7 @@ set -e
 
 # --- Cấu hình chung ---
 # Checkpoint để bắt đầu finetune (sử dụng model tốt nhất từ lần chạy trước)
-RESUME_CHECKPOINT="outputs/Kaggle_ViTB32_LiteHiCroPL_4Stage_SmartPush_100Epochs-Resumed-STAGE3_EXTENDED-[01-05]-[17:35]/model_best.pth"
+RESUME_CHECKPOINT="/kaggle/input/model-4stage/Kaggle_ViTB32_LiteHiCroPL_4Stage_SmartPush_100Epochs-V1/model_best.pth"
 
 # Tên cho lần chạy mới để lưu log và model
 EXP_NAME="Finetune-PhaseA-NeutralFocus"
